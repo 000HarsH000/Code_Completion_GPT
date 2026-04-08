@@ -1,0 +1,8 @@
+Data/
+
+__pycache__/
+*.pyc
+venv/
+ts_env/
+*.pt
+*.pth
