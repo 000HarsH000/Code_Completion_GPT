@@ -4,6 +4,8 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from torch.utils.data import Dataset, DataLoader
+from tqdm import tqdm
+import shutil
 
 
 class CodeDataset(Dataset):
@@ -44,6 +46,17 @@ train_loader = DataLoader(
     num_workers=2,
     pin_memory=True
 )
+
+# For multiprocessing
+# import multiprocessing
+
+# train_loader = DataLoader(
+#     train_dataset,
+#     batch_size=8,
+#     shuffle=True,
+#     num_workers=multiprocessing.cpu_count(),
+#     pin_memory=torch.cuda.is_available()
+# )
 
 
 class GPTEmbedding(nn.Module):
@@ -201,39 +214,120 @@ def train_step(model, batch, optimizer, device):
     x = x.to(device)
     y = y.to(device)
     
-    # 🔥 Forward pass
+    # Forward pass
     logits, loss = model(x, y)
     
-    # 🔥 Backward pass
+    # Backward pass
     optimizer.zero_grad()
     loss.backward()
     
-    # 🔥 Optimizer step
+    # Optimizer step
     optimizer.step()
     
     return loss.item()
 
 
-max_steps = 15000  
+
+base_path = os.path.join("src", "model")
+os.makedirs(base_path, exist_ok=True)
+
+checkpoint_path = os.path.join(base_path, "latest.pt")
+
+# ONLY these milestone saves
+milestones = [5000, 10000]
+
+# TRAINING CONFIG
+max_steps = 10000
+save_every = 1000
+
 step_count = 0
 total_loss = 0
 
-for epoch in range(1000):  # dummy loop (won't actually reach 1000)
-    for step, batch in enumerate(train_loader):
-        
-        loss = train_step(model, batch, optimizer, device)
-        
-        total_loss += loss
-        
-        if step_count % 100 == 0:
-            avg_loss = total_loss / (step_count + 1)
-            print(f"Step {step_count} | Loss: {loss:.4f} | Avg Loss: {avg_loss:.4f}")
-        
-        step_count += 1
-        
-        # Stop condition
+# LOAD CHECKPOINT
+if os.path.exists(checkpoint_path):
+    print("Loading checkpoint...")
+
+    checkpoint = torch.load(checkpoint_path, map_location=device)
+
+    model.load_state_dict(checkpoint["model"])
+    optimizer.load_state_dict(checkpoint["optimizer"])
+
+    step_count = checkpoint.get("step", 0)
+    total_loss = checkpoint.get("loss", 0)
+
+    print(f"Resumed from step {step_count}")
+
+else:
+    print("No checkpoint found, starting fresh.")
+
+# PROGRESS BAR
+pbar = tqdm(total=max_steps, initial=step_count)
+
+# SAVE FUNCTIONS
+def save_latest():
+    temp_path = checkpoint_path + ".tmp"
+
+    torch.save({
+        "model": model.state_dict(),
+        "optimizer": optimizer.state_dict(),
+        "step": step_count,
+        "loss": total_loss
+    }, temp_path)
+
+    os.replace(temp_path, checkpoint_path)
+
+
+def save_milestone(step):
+    path = os.path.join(base_path, f"model_step_{step}.pt")
+    temp_path = path + ".tmp"
+
+    torch.save({
+        "model": model.state_dict(),   # smaller file
+        "step": step
+    }, temp_path)
+
+    os.replace(temp_path, path)
+
+# TRAINING LOOP
+try:
+    for epoch in range(1000):
+        for batch in train_loader:
+
+            if step_count >= max_steps:
+                break
+
+            # TRAIN STEP
+            loss = train_step(model, batch, optimizer, device)
+
+            total_loss += loss
+            step_count += 1
+
+            # LOGGING
+            if step_count % 100 == 0:
+                avg_loss = total_loss / step_count
+                pbar.set_description(
+                    f"Loss: {loss:.4f} | Avg: {avg_loss:.4f}"
+                )
+
+            # SAVE RESUME CHECKPOINT
+            if step_count % save_every == 0:
+                save_latest()
+
+            # SAVE ONLY AT 5000 & 10000
+            if step_count in milestones:
+                save_milestone(step_count)
+                print(f"Saved model at step {step_count}")
+
+            pbar.update(1)
+
         if step_count >= max_steps:
             break
-    
-    if step_count >= max_steps:
-        break
+
+
+# FINAL SAVE
+finally:
+    save_latest()
+    pbar.close()
+
+    print(f"Training stopped at step {step_count}")
+    print(f"Models saved in: {base_path}")
